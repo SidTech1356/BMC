@@ -12,4 +12,4 @@
  *  then commit + push to the `main` branch.
  * ============================================================ */
 export const APPS_SCRIPT_EXEC_URL =
-  'https://script.google.com/macros/s/AKfycbzreIKwI5qJVmZk6Jod_JZusUWdQW65Kdo4SCem9aQsj3d1M7ihl40TUI--ppQrK6CKEw/exec';
+  'https://script.google.com/macros/s/AKfycbwI_fwcjIRVfwnlW4iUyo4CD4LuPCuAdqrBTTtGglML8kLExvq-LIRW9pjexH8A2JeaGw/exec';
