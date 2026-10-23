@@ -5,9 +5,9 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
-    // GitHub Pages project site lives at https://sidtech366.github.io/mps/ -
-    // assets must be referenced under /mps/, not the domain root.
-    base: '/mps/',
+    // GitHub Pages project site lives at https://sidtech1356.github.io/BMC/ -
+    // assets must be referenced under /BMC/, not the domain root.
+    base: '/BMC/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
