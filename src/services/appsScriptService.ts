@@ -1,0 +1,209 @@
+import { AppData, AdmissionInquiry } from '../types';
+import { defaultSchoolData } from '../data/defaultData';
+import { APPS_SCRIPT_EXEC_URL } from '../config';
+
+/** Strip any existing query string so we always control exactly which params go on the URL. */
+function baseExecUrl(url: string): string {
+  return url.split('?')[0];
+}
+
+/**
+ * Loads a GET endpoint via JSONP (a <script> tag, not fetch()). Google Apps Script's
+ * ContentService JSON output does not send Access-Control-Allow-Origin, so a plain
+ * fetch() from a different domain (this GitHub site) gets silently blocked by the
+ * browser even though the backend itself is working fine. A <script> tag is never
+ * subject to CORS, so this is the reliable way to read JSON from an Apps Script web
+ * app across domains. The backend wraps its JSON in `callback(...)` when `?callback=`
+ * is present (see PublicApi.gs).
+ */
+function jsonp<T = any>(url: string, timeoutMs = 10000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const cbName = 'mpsJsonp_' + Math.random().toString(36).slice(2) + Date.now();
+    const script = document.createElement('script');
+    let settled = false;
+
+    const cleanup = () => {
+      delete (window as any)[cbName];
+      script.remove();
+      clearTimeout(timer);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('Request timed out'));
+    }, timeoutMs);
+
+    (window as any)[cbName] = (data: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(data);
+    };
+    script.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('Could not load the school server (script error)'));
+    };
+
+    script.src = `${url}${url.includes('?') ? '&' : '?'}callback=${cbName}`;
+    document.head.appendChild(script);
+  });
+}
+
+/**
+ * Fetches live data from the real School Management System Apps Script backend
+ * (PublicApi.gs -> ?api=1&action=getAllData). Falls back to the bundled demo
+ * data if the request fails, so the site never breaks or shows an error state.
+ */
+export async function fetchSchoolData(): Promise<{ data: AppData; isLive: boolean }> {
+  try {
+    const fetchUrl = `${baseExecUrl(APPS_SCRIPT_EXEC_URL)}?api=1&action=getAllData&_t=${Date.now()}`;
+    // getAllData reads several sheets (site sections, staff, notices, fee structure,
+    // classes) in one call, and an Apps Script "cold start" can add several more
+    // seconds on top of that - 10s was cutting it close and timing out the request
+    // under normal load, so it's raised here specifically for this heavier call.
+    const json = await jsonp<any>(fetchUrl, 25000);
+
+    if (json.status !== 'success') throw new Error(json.message || 'Invalid response');
+
+    const mergedConfig = { ...defaultSchoolData.config, ...(json.config || {}) };
+
+    const mergedData: AppData = {
+      config: mergedConfig,
+      leaders: (json.leaders && json.leaders.length > 0) ? json.leaders : defaultSchoolData.leaders,
+      staff: (json.staff && json.staff.length > 0) ? json.staff : defaultSchoolData.staff,
+      photos: (json.photos && json.photos.length > 0) ? json.photos : defaultSchoolData.photos,
+      videos: (json.videos && json.videos.length > 0) ? json.videos : defaultSchoolData.videos,
+      notices: (json.notices && json.notices.length > 0) ? json.notices : defaultSchoolData.notices,
+      feeStructure: (json.feeStructure && json.feeStructure.length > 0) ? json.feeStructure : defaultSchoolData.feeStructure,
+      classes: (json.classes && json.classes.length > 0) ? json.classes : defaultSchoolData.classes,
+      source: 'google_sheets',
+    };
+
+    return { data: mergedData, isLive: true };
+  } catch (err) {
+    // Not shown to visitors anywhere on the page (per the "no connection details visible"
+    // requirement) - only printed to the browser DevTools console, so this can be checked
+    // by opening the real browser's console (F12 / "Inspect") without exposing anything
+    // on the page itself.
+    console.warn('[MPS] Could not load live data from the school server, showing demo content instead:', err);
+    return { data: { ...defaultSchoolData, source: 'fallback_local' }, isLive: false };
+  }
+}
+
+/**
+ * Submits an admission inquiry to the real backend (PublicApi.gs doPost action=submitAdmission).
+ * Field names match publicApiPost_'s expected shape.
+ */
+export async function submitAdmissionInquiry(
+  inquiry: AdmissionInquiry
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const res = await fetch(baseExecUrl(APPS_SCRIPT_EXEC_URL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'submitAdmission',
+        studentName: inquiry.studentName,
+        parentName: inquiry.parentName,
+        motherName: inquiry.motherName || '',
+        mobile: inquiry.mobile,
+        dob: inquiry.dob,
+        gender: inquiry.gender,
+        classId: inquiry.classId,
+        address: inquiry.address,
+      }),
+    });
+
+    const result = await res.json().catch(() => ({ status: 'success' }));
+    if (result.status === 'error') {
+      return { success: false, message: result.message || 'Could not submit the inquiry. Please try again.' };
+    }
+    return {
+      success: true,
+      message: result.message || 'Admission inquiry submitted successfully. The school will contact you soon.',
+    };
+  } catch (err) {
+    return {
+      success: false,
+      message: 'Could not reach the school server right now. Please try again or call the school office.',
+    };
+  }
+}
+
+/**
+ * Real login against the live School Management System (PublicApi.gs doPost action=login).
+ * Returns the same token the Apps Script dashboard itself issues on login, so it can be
+ * handed straight back for the SSO redirect.
+ */
+export async function loginRequest(
+  mobile: string,
+  password: string
+): Promise<{ success: boolean; token?: string; user?: any; message?: string }> {
+  try {
+    const res = await fetch(baseExecUrl(APPS_SCRIPT_EXEC_URL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'login', mobile, password }),
+    });
+    const json = await res.json();
+    if (json.status === 'success' && json.token) {
+      return { success: true, token: json.token, user: json.user };
+    }
+    return { success: false, message: json.message || 'Invalid mobile number or password.' };
+  } catch (err) {
+    return { success: false, message: 'Could not reach the school server. Please check your internet connection.' };
+  }
+}
+
+/** The dashboard URL to redirect to after a successful login (SSO handoff, ?tok=...). */
+export function buildDashboardSsoUrl(token: string): string {
+  return `${baseExecUrl(APPS_SCRIPT_EXEC_URL)}?tok=${encodeURIComponent(token)}`;
+}
+
+/**
+ * Checks whether a previously-saved login token is still valid on the backend
+ * (PublicApi.gs ?api=1&action=whoami). Used so that a visitor who is already logged
+ * in lands straight back in the dashboard when they reopen the site - only an actual
+ * logout or an expired session (the backend caches tokens for 6 hours) sends them
+ * back to the homepage/login.
+ */
+export async function checkSession(token: string): Promise<boolean> {
+  try {
+    const fetchUrl = `${baseExecUrl(APPS_SCRIPT_EXEC_URL)}?api=1&action=whoami&token=${encodeURIComponent(token)}&_t=${Date.now()}`;
+    const json = await jsonp<any>(fetchUrl);
+    return !!(json.status === 'success' && json.valid);
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Forgot-password request (PublicApi.gs doPost action=forgotPassword -> reuses the
+ * school's existing requestPasswordReset()). This does NOT reset the password itself -
+ * it only files a request. The school office approves or rejects it from the
+ * "Password Reset Requests" page in the real dashboard, exactly like it already works
+ * for people who use the "Forgot password?" link inside the Apps Script login page.
+ */
+export async function requestPasswordReset(
+  mobile: string,
+  name: string,
+  newPassword: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const res = await fetch(baseExecUrl(APPS_SCRIPT_EXEC_URL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'forgotPassword', mobile, name, newPassword }),
+    });
+    const json = await res.json();
+    if (json.status === 'success') {
+      return { success: true, message: json.message || 'Your request has been sent to the school office.' };
+    }
+    return { success: false, message: json.message || 'Could not submit the request.' };
+  } catch (err) {
+    return { success: false, message: 'Could not reach the school server. Please check your internet connection.' };
+  }
+}
